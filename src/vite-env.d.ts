@@ -5,6 +5,8 @@ interface ImportMetaEnv {
   readonly VITE_CREATOR_APP_NAME?: string;
   readonly VITE_CREATOR_FORM_LINK_NAME?: string;
   readonly VITE_CREATOR_REPORT_LINK_NAME?: string;
+  readonly VITE_CREATOR_FORM_PRIVATE_LINK?: string;
+  readonly VITE_CREATOR_REPORT_PRIVATE_LINK?: string;
 }
 
 interface ImportMeta {

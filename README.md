@@ -100,11 +100,10 @@ It stays out of the bundle, so mock mode keeps working when the script is unavai
 1. Set these in the deployed environment:
    - `VITE_USE_CREATOR_MOCK=false`
    - `VITE_CREATOR_APP_NAME` only if the app link name differs from `external-deal-response`
-2. `creatorService.ts` calls, in order:
-   - `ZOHO.CREATOR.init()` (once, if exposed by the SDK)
-   - `ZOHO.CREATOR.PUBLISH.addRecords({ app_name, form_name, payload: { data } })`
-   - `ZOHO.CREATOR.PUBLISH.uploadFile({ app_name, report_name, id, field_name: "Upload_File", file })`
-3. The form and report must be published in Creator for the `PUBLISH` API to accept calls.
+2. `creatorService.ts` picks the API automatically (SDK v2 has no `init()`):
+   - **Logged-in Creator users** (no publish keys set): `ZOHO.CREATOR.DATA.addRecords(...)` then `ZOHO.CREATOR.FILE.uploadFile(...)`.
+   - **External / anonymous users** (both publish keys set): `ZOHO.CREATOR.PUBLISH.addRecords(...)` then `ZOHO.CREATOR.PUBLISH.uploadFile(...)`, each with its `private_link`.
+3. For external users, publish the form, the report, and the Page in Creator. Copy the key at the end of the published form URL into `VITE_CREATOR_FORM_PRIVATE_LINK` and the key from the published report URL into `VITE_CREATOR_REPORT_PRIVATE_LINK`. A `PUBLISH` call without its key is never answered by Creator, so every SDK call is wrapped in a timeout.
 4. Embed the deployed URL in a Creator Page with the Deal ID appended, for example an iframe pointing to `https://your-app.vercel.app/?CRM_Deal_ID=${input.deal_id}`.
 
 If Creator returns a different success shape, adjust `isSuccessfulResponse()` in the service file only. Success is currently detected by `code === 3000` and a `data.ID` on the add response.

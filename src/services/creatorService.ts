@@ -4,9 +4,12 @@
  * ALL Zoho Creator SDK interaction lives in this file. Visual components and
  * hooks never touch `window.ZOHO` directly.
  *
- * Two modes:
- *  1. Mock mode  - VITE_USE_CREATOR_MOCK=true, or window.ZOHO unavailable.
- *  2. Creator    - uses ZOHO.CREATOR.PUBLISH.addRecords / uploadFile.
+ * Modes:
+ *  1. Mock mode - VITE_USE_CREATOR_MOCK=true, or window.ZOHO unavailable.
+ *  2. Creator   - Widget SDK v2.
+ *       - Logged-in users:          ZOHO.CREATOR.DATA.addRecords + ZOHO.CREATOR.FILE.uploadFile
+ *       - External/anonymous users: ZOHO.CREATOR.PUBLISH.addRecords + PUBLISH.uploadFile
+ *         (requires the publish keys, see FORM_PRIVATE_LINK / REPORT_PRIVATE_LINK)
  *
  * NOTE: Transferring Upload_File to a Zoho CRM custom File Upload field is a
  * backend (Creator/Deluge) concern and is intentionally NOT implemented here.
@@ -24,25 +27,42 @@ import {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/** Creator application link name (SDK v2 requires it on every call). */
+/**
+ * Creator application link name. SDK v2 fills it in from the hosting app when
+ * omitted, but being explicit avoids surprises.
+ */
 const APP_LINK_NAME: string = import.meta.env.VITE_CREATOR_APP_NAME || "external-deal-response";
 const FORM_LINK_NAME: string = import.meta.env.VITE_CREATOR_FORM_LINK_NAME || "Deal_Response_Form";
 const UPLOAD_FIELD_LINK_NAME = "Upload_File";
 /** Report link name used by uploadFile (Creator's uploadFile requires a report context). */
 const REPORT_LINK_NAME: string = import.meta.env.VITE_CREATOR_REPORT_LINK_NAME || "All_Deal_Responses";
 
+/**
+ * Publish keys ("private links") of the published form and report.
+ * When BOTH are set the PUBLISH API is used (anonymous/external users).
+ * When unset the DATA/FILE API is used (logged-in Creator users).
+ * These keys already appear in the public publish URLs, so they are not secrets.
+ */
+const FORM_PRIVATE_LINK: string = import.meta.env.VITE_CREATOR_FORM_PRIVATE_LINK || "";
+const REPORT_PRIVATE_LINK: string = import.meta.env.VITE_CREATOR_REPORT_PRIVATE_LINK || "";
+
 const MOCK_DELAY_MS = 900;
+const ADD_RECORD_TIMEOUT_MS = 30_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
+const PARAMS_TIMEOUT_MS = 5_000;
 const isDev = import.meta.env.DEV;
 
 // ---------------------------------------------------------------------------
 // Minimal typing for the parts of the Creator Widget SDK v2 we call.
 // https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js
+// v2 has no init(); every call waits internally for the parent "Load" event.
 // ---------------------------------------------------------------------------
 
 interface ZohoCreatorAddRecordsConfig {
   app_name: string;
   form_name: string;
   payload: { data: Record<string, unknown> };
+  private_link?: string;
 }
 
 interface ZohoCreatorUploadFileConfig {
@@ -51,6 +71,7 @@ interface ZohoCreatorUploadFileConfig {
   id: string;
   field_name: string;
   file: File;
+  private_link?: string;
 }
 
 interface ZohoCreatorResponse {
@@ -60,9 +81,11 @@ interface ZohoCreatorResponse {
   error?: unknown;
 }
 
-interface ZohoCreatorPublishApi {
-  addRecords(config: ZohoCreatorAddRecordsConfig): Promise<ZohoCreatorResponse>;
-  uploadFile(config: ZohoCreatorUploadFileConfig): Promise<ZohoCreatorResponse>;
+type SdkResult = ZohoCreatorResponse | string | undefined;
+
+interface ZohoCreatorRecordsApi {
+  addRecords?(config: ZohoCreatorAddRecordsConfig): Promise<SdkResult>;
+  uploadFile?(config: ZohoCreatorUploadFileConfig): Promise<SdkResult>;
 }
 
 type ParamGetter = () => Promise<Record<string, unknown> | undefined> | Record<string, unknown> | undefined;
@@ -73,17 +96,16 @@ interface ZohoCreatorUtilApi {
   getInitParams?: ParamGetter;
 }
 
-interface ZohoSdk {
-  CREATOR?: {
-    PUBLISH?: ZohoCreatorPublishApi;
-    UTIL?: ZohoCreatorUtilApi;
-    init?: () => Promise<unknown>;
-  };
+interface ZohoCreatorSdk {
+  DATA?: ZohoCreatorRecordsApi;
+  FILE?: ZohoCreatorRecordsApi;
+  PUBLISH?: ZohoCreatorRecordsApi;
+  UTIL?: ZohoCreatorUtilApi;
 }
 
 declare global {
   interface Window {
-    ZOHO?: ZohoSdk;
+    ZOHO?: { CREATOR?: ZohoCreatorSdk };
   }
 }
 
@@ -97,14 +119,19 @@ function isMockFlagEnabled(): boolean {
   return String(import.meta.env.VITE_USE_CREATOR_MOCK ?? "").toLowerCase() === "true";
 }
 
-function getCreatorPublishApi(): ZohoCreatorPublishApi | null {
+function getCreatorSdk(): ZohoCreatorSdk | null {
   if (typeof window === "undefined") return null;
-  return window.ZOHO?.CREATOR?.PUBLISH ?? null;
+  return window.ZOHO?.CREATOR ?? null;
+}
+
+/** The PUBLISH API is used only when both publish keys are configured. */
+function shouldUsePublishApi(): boolean {
+  return FORM_PRIVATE_LINK.length > 0 && REPORT_PRIVATE_LINK.length > 0;
 }
 
 export function getCreatorMode(): CreatorMode {
   if (isMockFlagEnabled()) return "mock";
-  if (!getCreatorPublishApi()) {
+  if (!getCreatorSdk()) {
     if (isDev) {
       console.warn("[creatorService] window.ZOHO not available - falling back to mock mode.");
     }
@@ -114,20 +141,63 @@ export function getCreatorMode(): CreatorMode {
 }
 
 // ---------------------------------------------------------------------------
-// Logging (development only)
+// Logging
 // ---------------------------------------------------------------------------
 
 function devLog(...args: unknown[]): void {
   if (isDev) console.info("[creatorService]", ...args);
 }
 
+/** Logged in production too: without this a failed submission cannot be debugged. */
+function logFailure(label: string, detail: unknown): void {
+  console.error(`[creatorService] ${label}`, detail);
+}
+
 // ---------------------------------------------------------------------------
-// Mock implementation
+// Helpers
 // ---------------------------------------------------------------------------
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Rejects if the SDK never answers, so the UI can never spin forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** The SDK may hand back a JSON string or an object depending on the operation. */
+function parseSdkResult(result: SdkResult): ZohoCreatorResponse | undefined {
+  if (typeof result === "string") {
+    try {
+      return JSON.parse(result) as ZohoCreatorResponse;
+    } catch {
+      return { message: result };
+    }
+  }
+  return result;
+}
+
+function isSuccessfulResponse(res: ZohoCreatorResponse | undefined): boolean {
+  if (!res) return false;
+  return res.code === 3000 || res.code === 200 || (res.code === undefined && !res.error);
+}
+
+// ---------------------------------------------------------------------------
+// Mock implementation
+// ---------------------------------------------------------------------------
 
 function mockRecordId(): string {
   return `MOCK_${Math.floor(100000 + Math.random() * 900000)}`;
@@ -155,82 +225,71 @@ async function mockUploadFile(recordId: string, file: File): Promise<UploadFileR
 }
 
 // ---------------------------------------------------------------------------
-// Zoho Creator implementation
+// Zoho Creator implementation (Widget SDK v2)
 // ---------------------------------------------------------------------------
 
-let initPromise: Promise<void> | null = null;
-
-async function ensureCreatorInitialised(): Promise<ZohoCreatorPublishApi> {
-  const api = getCreatorPublishApi();
-  if (!api) {
+async function creatorCreateRecord(payload: DealResponseRecordPayload): Promise<CreateRecordResult> {
+  const sdk = getCreatorSdk();
+  const publish = shouldUsePublishApi();
+  const api = publish ? sdk?.PUBLISH : sdk?.DATA;
+  if (!api?.addRecords) {
+    logFailure("addRecords unavailable", { publish });
     throw new CreatorServiceError("Zoho Creator SDK is not available.", "config");
   }
-  if (!APP_LINK_NAME) {
-    devLog("VITE_CREATOR_APP_NAME is not set; SDK v2 calls require the app link name.");
-    throw new CreatorServiceError("Zoho Creator application name is not configured.", "config");
-  }
-  const init = window.ZOHO?.CREATOR?.init;
-  if (init && !initPromise) {
-    initPromise = Promise.resolve(init()).then(() => undefined);
-  }
-  if (initPromise) await initPromise;
-  return api;
-}
 
-function isSuccessfulResponse(res: ZohoCreatorResponse | undefined): boolean {
-  if (!res) return false;
-  return res.code === 3000 || res.code === 200 || (res.code === undefined && !res.error);
-}
+  const config: ZohoCreatorAddRecordsConfig = {
+    app_name: APP_LINK_NAME,
+    form_name: FORM_LINK_NAME,
+    payload: { data: { ...payload } },
+  };
+  if (publish) config.private_link = FORM_PRIVATE_LINK;
+  devLog(`addRecords via ${publish ? "PUBLISH" : "DATA"}`, { form_name: FORM_LINK_NAME });
 
-async function creatorCreateRecord(payload: DealResponseRecordPayload): Promise<CreateRecordResult> {
-  const api = await ensureCreatorInitialised();
-  devLog("addRecords", { app_name: APP_LINK_NAME, form_name: FORM_LINK_NAME });
-
-  let res: ZohoCreatorResponse;
+  let res: ZohoCreatorResponse | undefined;
   try {
-    res = await api.addRecords({
-      app_name: APP_LINK_NAME,
-      form_name: FORM_LINK_NAME,
-      payload: { data: { ...payload } },
-    });
+    res = parseSdkResult(await withTimeout(api.addRecords(config), ADD_RECORD_TIMEOUT_MS, "addRecords"));
   } catch (err) {
-    devLog("addRecords threw", err);
+    logFailure("addRecords failed", err);
     throw new CreatorServiceError("Unable to create the response record.", "create");
   }
 
   const id = res?.data?.ID;
   if (!isSuccessfulResponse(res) || id === undefined || id === null) {
-    devLog("addRecords failed", res);
+    logFailure("addRecords returned an error", res);
     throw new CreatorServiceError("Unable to create the response record.", "create");
   }
   return { success: true, recordId: String(id) };
 }
 
 async function creatorUploadFile(recordId: string, file: File): Promise<UploadFileResult> {
-  const api = await ensureCreatorInitialised();
-  devLog("uploadFile", {
+  const sdk = getCreatorSdk();
+  const publish = shouldUsePublishApi();
+  const api = publish ? sdk?.PUBLISH : sdk?.FILE;
+  if (!api?.uploadFile) {
+    logFailure("uploadFile unavailable", { publish });
+    throw new CreatorServiceError("Zoho Creator SDK is not available.", "upload", recordId);
+  }
+
+  const config: ZohoCreatorUploadFileConfig = {
     app_name: APP_LINK_NAME,
     report_name: REPORT_LINK_NAME,
     id: recordId,
     field_name: UPLOAD_FIELD_LINK_NAME,
-  });
+    file,
+  };
+  if (publish) config.private_link = REPORT_PRIVATE_LINK;
+  devLog(`uploadFile via ${publish ? "PUBLISH" : "FILE"}`, { report_name: REPORT_LINK_NAME, id: recordId });
 
-  let res: ZohoCreatorResponse;
+  let res: ZohoCreatorResponse | undefined;
   try {
-    res = await api.uploadFile({
-      app_name: APP_LINK_NAME,
-      report_name: REPORT_LINK_NAME,
-      id: recordId,
-      field_name: UPLOAD_FIELD_LINK_NAME,
-      file,
-    });
+    res = parseSdkResult(await withTimeout(api.uploadFile(config), UPLOAD_TIMEOUT_MS, "uploadFile"));
   } catch (err) {
-    devLog("uploadFile threw", err);
+    logFailure("uploadFile failed", err);
     throw new CreatorServiceError("Unable to upload the file.", "upload", recordId);
   }
 
   if (!isSuccessfulResponse(res)) {
-    devLog("uploadFile failed", res);
+    logFailure("uploadFile returned an error", res);
     throw new CreatorServiceError("Unable to upload the file.", "upload", recordId);
   }
   return { success: true };
@@ -242,22 +301,12 @@ async function creatorUploadFile(recordId: string, file: File): Promise<UploadFi
 
 /**
  * Reads parameters that a Creator Page passes to the widget through the SDK.
- * Returns an empty object when the SDK is unavailable, so callers can fall
- * back to the URL query string.
+ * Returns an empty object when the SDK is unavailable or silent, so callers
+ * can fall back to the URL query string.
  */
 export async function getCreatorWidgetParams(): Promise<Record<string, string>> {
-  const util = typeof window === "undefined" ? undefined : window.ZOHO?.CREATOR?.UTIL;
+  const util = getCreatorSdk()?.UTIL;
   if (!util) return {};
-
-  const init = window.ZOHO?.CREATOR?.init;
-  if (init && !initPromise) {
-    initPromise = Promise.resolve(init()).then(() => undefined);
-  }
-  try {
-    if (initPromise) await initPromise;
-  } catch (err) {
-    devLog("ZOHO.CREATOR.init failed while reading widget params", err);
-  }
 
   const getters: ParamGetter[] = [util.getQueryParams, util.getWidgetParams, util.getInitParams].filter(
     (fn): fn is ParamGetter => typeof fn === "function",
@@ -266,16 +315,17 @@ export async function getCreatorWidgetParams(): Promise<Record<string, string>> 
   const merged: Record<string, string> = {};
   for (const getter of getters) {
     try {
-      const result = await Promise.resolve(getter.call(util));
+      const result = await withTimeout(Promise.resolve(getter.call(util)), PARAMS_TIMEOUT_MS, "widget params");
       if (result && typeof result === "object") {
         for (const [key, value] of Object.entries(result)) {
-          if (value !== undefined && value !== null && merged[key] === undefined) {
+          if (value !== undefined && value !== null && typeof value !== "object" && merged[key] === undefined) {
             merged[key] = String(value);
           }
         }
       }
     } catch (err) {
       devLog("widget param getter failed", err);
+      break; // SDK is not answering (not inside Creator); stop waiting.
     }
   }
   devLog("widget params", Object.keys(merged));
