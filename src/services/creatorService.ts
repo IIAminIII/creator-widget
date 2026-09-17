@@ -191,7 +191,14 @@ function devLog(...args: unknown[]): void {
 
 /** Logged in production too: without this a failed submission cannot be debugged. */
 function logFailure(label: string, detail: unknown): void {
-  console.error(`[creatorService] ${label}`, detail);
+  console.error(`[creatorService] ${label}`, detail, {
+    api: shouldUsePublishApi() ? "PUBLISH (anonymous)" : "DATA/FILE (requires Zoho login)",
+    formKeySet: FORM_PRIVATE_LINK.length > 0,
+    reportKeySet: REPORT_PRIVATE_LINK.length > 0,
+    app: APP_LINK_NAME,
+    form: FORM_LINK_NAME,
+    report: REPORT_LINK_NAME,
+  });
 }
 
 // ---------------------------------------------------------------------------
