@@ -34,6 +34,9 @@ import {
 const APP_LINK_NAME: string = import.meta.env.VITE_CREATOR_APP_NAME || "external-deal-response";
 const FORM_LINK_NAME: string = import.meta.env.VITE_CREATOR_FORM_LINK_NAME || "Deal_Response_Form";
 const UPLOAD_FIELD_LINK_NAME = "Upload_File";
+/** Set after a successful upload so Creator's "Edited" workflow can sync the file to CRM. */
+const FILE_SYNC_STATUS_FIELD = "CRM_File_Sync_Status";
+const FILE_SYNC_PENDING_VALUE = "Pending";
 /** Report link name used by uploadFile (Creator's uploadFile requires a report context). */
 const REPORT_LINK_NAME: string = import.meta.env.VITE_CREATOR_REPORT_LINK_NAME || "All_Responses";
 
@@ -86,6 +89,24 @@ type SdkResult = ZohoCreatorResponse | string | undefined;
 interface ZohoCreatorRecordsApi {
   addRecords?(config: ZohoCreatorAddRecordsConfig): Promise<SdkResult>;
   uploadFile?(config: ZohoCreatorUploadFileConfig): Promise<SdkResult>;
+  updateRecordById?(config: ZohoCreatorUpdateRecordConfig): Promise<SdkResult>;
+  updateRecords?(config: ZohoCreatorUpdateRecordsConfig): Promise<SdkResult>;
+}
+
+interface ZohoCreatorUpdateRecordConfig {
+  app_name: string;
+  report_name: string;
+  id: string;
+  payload: { data: Record<string, unknown> };
+}
+
+/** Bulk update by criteria. The only update call available in PUBLISH mode. */
+interface ZohoCreatorUpdateRecordsConfig {
+  app_name: string;
+  report_name: string;
+  payload: { criteria: string; data: Record<string, unknown> };
+  process_until_limit?: boolean;
+  private_link?: string;
 }
 
 type ParamGetter = () => Promise<Record<string, unknown> | undefined> | Record<string, unknown> | undefined;
@@ -316,6 +337,59 @@ async function creatorUploadFile(recordId: string, file: File): Promise<UploadFi
   return { success: true };
 }
 
+/**
+ * Tells the Creator backend that the file is now in place.
+ *
+ * The form's "Created" workflow runs BEFORE the file exists (the record has to
+ * be created first), and a file upload does not fire workflows. This small
+ * record update fires the form's "Edited > On Success" workflow, which is where
+ * the Deluge script transfers Upload_File to the CRM Deal.
+ *
+ * Best effort only: the user's submission is already complete, so a failure
+ * here is logged and never surfaced. A Creator Schedule can sweep up any
+ * record left without a file sync status.
+ *
+ * PUBLISH mode has no update-by-id call, so it uses the bulk update-by-criteria
+ * call narrowed to this one record ID.
+ */
+async function creatorMarkFileReady(recordId: string): Promise<void> {
+  const sdk = getCreatorSdk();
+  const publish = shouldUsePublishApi();
+  const data = { [FILE_SYNC_STATUS_FIELD]: FILE_SYNC_PENDING_VALUE };
+
+  let call: Promise<SdkResult> | null = null;
+  if (publish) {
+    const api = sdk?.PUBLISH;
+    if (api?.updateRecords) {
+      call = api.updateRecords({
+        app_name: APP_LINK_NAME,
+        report_name: REPORT_LINK_NAME,
+        payload: { criteria: `ID == ${recordId}`, data },
+        process_until_limit: false,
+        private_link: REPORT_PRIVATE_LINK,
+      });
+    }
+  } else {
+    const api = sdk?.DATA;
+    if (api?.updateRecordById) {
+      call = api.updateRecordById({
+        app_name: APP_LINK_NAME,
+        report_name: REPORT_LINK_NAME,
+        id: recordId,
+        payload: { data },
+      });
+    }
+  }
+  if (!call) return;
+
+  try {
+    const res = parseSdkResult(await withTimeout(call, ADD_RECORD_TIMEOUT_MS, "file-ready update"));
+    if (!isSuccessfulResponse(res)) logFailure("file-ready update returned an error (non-fatal)", res);
+  } catch (err) {
+    logFailure("file-ready update failed (non-fatal)", err);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Widget parameters (Creator Page -> widget)
 // ---------------------------------------------------------------------------
@@ -386,6 +460,12 @@ export async function submitDealResponse(
   } catch (err) {
     if (err instanceof CreatorServiceError) throw err;
     throw new CreatorServiceError("Unable to upload the file.", "upload", recordId);
+  }
+
+  if (getCreatorMode() === "creator") {
+    await creatorMarkFileReady(recordId);
+  } else {
+    devLog("MOCK updateRecordById", { id: recordId, [FILE_SYNC_STATUS_FIELD]: FILE_SYNC_PENDING_VALUE });
   }
 
   return { success: true, recordId };
