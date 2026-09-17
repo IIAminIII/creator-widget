@@ -377,8 +377,9 @@ async function creatorMarkFileReady(recordId: string): Promise<void> {
       call = api.updateRecords({
         app_name: APP_LINK_NAME,
         report_name: REPORT_LINK_NAME,
+        // Do NOT pass process_until_limit: the SDK rejects any falsy config
+        // value as "Improper Configuration", and `false` is falsy.
         payload: { criteria: `ID == ${recordId}`, data },
-        process_until_limit: false,
         private_link: REPORT_PRIVATE_LINK,
       });
     }
