@@ -31,14 +31,17 @@ import {
  * Creator application link name. SDK v2 fills it in from the hosting app when
  * omitted, but being explicit avoids surprises.
  */
-const APP_LINK_NAME: string = import.meta.env.VITE_CREATOR_APP_NAME || "external-deal-response";
-const FORM_LINK_NAME: string = import.meta.env.VITE_CREATOR_FORM_LINK_NAME || "Deal_Response_Form";
+const APP_LINK_NAME: string =
+  import.meta.env.VITE_CREATOR_APP_NAME || __CREATOR_APP_NAME__ || "external-deal-response";
+const FORM_LINK_NAME: string =
+  import.meta.env.VITE_CREATOR_FORM_LINK_NAME || __CREATOR_FORM_LINK_NAME__ || "Deal_Response_Form";
 const UPLOAD_FIELD_LINK_NAME = "Upload_File";
 /** Set after a successful upload so Creator's "Edited" workflow can sync the file to CRM. */
 const FILE_SYNC_STATUS_FIELD = "CRM_File_Sync_Status";
 const FILE_SYNC_PENDING_VALUE = "Pending";
 /** Report link name used by uploadFile (Creator's uploadFile requires a report context). */
-const REPORT_LINK_NAME: string = import.meta.env.VITE_CREATOR_REPORT_LINK_NAME || "All_Responses";
+const REPORT_LINK_NAME: string =
+  import.meta.env.VITE_CREATOR_REPORT_LINK_NAME || __CREATOR_REPORT_LINK_NAME__ || "All_Responses";
 
 /**
  * Publish keys ("private links") of the published form and report.
@@ -46,8 +49,10 @@ const REPORT_LINK_NAME: string = import.meta.env.VITE_CREATOR_REPORT_LINK_NAME |
  * When unset the DATA/FILE API is used (logged-in Creator users).
  * These keys already appear in the public publish URLs, so they are not secrets.
  */
-const FORM_PRIVATE_LINK: string = import.meta.env.VITE_CREATOR_FORM_PRIVATE_LINK || "";
-const REPORT_PRIVATE_LINK: string = import.meta.env.VITE_CREATOR_REPORT_PRIVATE_LINK || "";
+const FORM_PRIVATE_LINK: string =
+  import.meta.env.VITE_CREATOR_FORM_PRIVATE_LINK || __CREATOR_FORM_PRIVATE_LINK__ || "";
+const REPORT_PRIVATE_LINK: string =
+  import.meta.env.VITE_CREATOR_REPORT_PRIVATE_LINK || __CREATOR_REPORT_PRIVATE_LINK__ || "";
 
 const MOCK_DELAY_MS = 900;
 const ADD_RECORD_TIMEOUT_MS = 30_000;
@@ -137,7 +142,8 @@ declare global {
 export type CreatorMode = "mock" | "creator";
 
 function isMockFlagEnabled(): boolean {
-  return String(import.meta.env.VITE_USE_CREATOR_MOCK ?? "").toLowerCase() === "true";
+  const flag = import.meta.env.VITE_USE_CREATOR_MOCK || __CREATOR_USE_MOCK__ || "";
+  return String(flag).toLowerCase() === "true";
 }
 
 function getCreatorSdk(): ZohoCreatorSdk | null {
