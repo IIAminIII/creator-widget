@@ -35,7 +35,7 @@ const APP_LINK_NAME: string = import.meta.env.VITE_CREATOR_APP_NAME || "external
 const FORM_LINK_NAME: string = import.meta.env.VITE_CREATOR_FORM_LINK_NAME || "Deal_Response_Form";
 const UPLOAD_FIELD_LINK_NAME = "Upload_File";
 /** Report link name used by uploadFile (Creator's uploadFile requires a report context). */
-const REPORT_LINK_NAME: string = import.meta.env.VITE_CREATOR_REPORT_LINK_NAME || "All_Deal_Responses";
+const REPORT_LINK_NAME: string = import.meta.env.VITE_CREATOR_REPORT_LINK_NAME || "All_Responses";
 
 /**
  * Publish keys ("private links") of the published form and report.
@@ -122,6 +122,26 @@ function isMockFlagEnabled(): boolean {
 function getCreatorSdk(): ZohoCreatorSdk | null {
   if (typeof window === "undefined") return null;
   return window.ZOHO?.CREATOR ?? null;
+}
+
+/**
+ * Creator appends `serviceOrigin` to the widget URL when it loads the widget
+ * through a Page's Widget element. The SDK needs it to reach its parent frame;
+ * without it every SDK call waits forever.
+ */
+function isInsideCreatorFrame(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.parent !== window && /[?&]serviceOrigin=/.test(window.location.href);
+}
+
+function assertInsideCreatorFrame(stage: "create" | "upload"): void {
+  if (isInsideCreatorFrame()) return;
+  logFailure(
+    "Not running inside a Zoho Creator widget frame",
+    "The URL has no serviceOrigin parameter. Open the Creator Page that contains the Widget element; " +
+      "do not open the hosted URL directly or embed it with an iframe/embed element.",
+  );
+  throw new CreatorServiceError("Zoho Creator connection is not available.", stage === "create" ? "config" : "upload");
 }
 
 /** The PUBLISH API is used only when both publish keys are configured. */
@@ -229,6 +249,7 @@ async function mockUploadFile(recordId: string, file: File): Promise<UploadFileR
 // ---------------------------------------------------------------------------
 
 async function creatorCreateRecord(payload: DealResponseRecordPayload): Promise<CreateRecordResult> {
+  assertInsideCreatorFrame("create");
   const sdk = getCreatorSdk();
   const publish = shouldUsePublishApi();
   const api = publish ? sdk?.PUBLISH : sdk?.DATA;
@@ -306,7 +327,7 @@ async function creatorUploadFile(recordId: string, file: File): Promise<UploadFi
  */
 export async function getCreatorWidgetParams(): Promise<Record<string, string>> {
   const util = getCreatorSdk()?.UTIL;
-  if (!util) return {};
+  if (!util || !isInsideCreatorFrame()) return {};
 
   const getters: ParamGetter[] = [util.getQueryParams, util.getWidgetParams, util.getInitParams].filter(
     (fn): fn is ParamGetter => typeof fn === "function",

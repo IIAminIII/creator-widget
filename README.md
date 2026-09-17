@@ -81,7 +81,7 @@ See `.env.example`.
 | `VITE_USE_CREATOR_MOCK`         | `true`               | Force mock mode. When not `true`, the SDK is used if `window.ZOHO` exists; otherwise the app falls back to mock mode automatically. |
 | `VITE_CREATOR_APP_NAME`         | `external-deal-response` | Creator application link name used by SDK v2. |
 | `VITE_CREATOR_FORM_LINK_NAME`   | `Deal_Response_Form` | Creator form link name passed to `addRecords`. |
-| `VITE_CREATOR_REPORT_LINK_NAME` | `All_Deal_Responses` | Creator report link name required by `uploadFile`. |
+| `VITE_CREATOR_REPORT_LINK_NAME` | `All_Responses` | Creator report link name required by `uploadFile`. |
 
 Check the link names in Creator (Form settings > Link name) and adjust if they differ.
 
